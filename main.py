@@ -1,9 +1,11 @@
 """
-Главный скрипт проекта Titanic ML
+Главный скрипт проекта House Prices ML
 Запуск: python main.py
 """
 
+import os
 import sys
+import urllib.request
 import warnings
 from pathlib import Path
 
@@ -14,11 +16,11 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import StackingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import log_loss
-from catboost import CatBoostClassifier
+from sklearn.ensemble import StackingRegressor
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+from catboost import CatBoostRegressor
+from sklearn.ensemble import RandomForestRegressor
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -26,7 +28,7 @@ from src.config import get_config
 from src.data_loader import load_train_data, load_test_data
 from src.preprocessor import preprocess_data
 from src.feature_engineering import build_features
-from src.evaluate import cross_validate_models, grid_search_models, compare_k_folds
+from src.evaluate import cross_validate_models
 from src.ensemble import create_ensembles
 from src.dnn_model import train_dnn, predict_dnn
 from src.train import get_model
@@ -35,17 +37,35 @@ from src.utils import setup_logger, save_results, save_submission_from_preds
 warnings.filterwarnings("ignore")
 
 
-def ensure_numeric(df):
-    for col in df.select_dtypes(include=['object', 'category']).columns:
-        df[col] = df[col].astype('category').cat.codes
-    return df
+def download_data():
+    """Автоматически скачивает данные, если они отсутствуют"""
+    os.makedirs("data", exist_ok=True)
+    
+    # Замените ссылки на актуальные, если нужно
+    files = {
+        "train.csv": "https://raw.githubusercontent.com/.../house-prices/train.csv",
+        "test.csv": "https://raw.githubusercontent.com/.../house-prices/test.csv"
+    }
+    
+    print("\n" + "="*60)
+    print("Проверка наличия данных...")
+    for filename, url in files.items():
+        path = f"data/{filename}"
+        if not os.path.exists(path):
+            print(f"  Скачивание {filename}...")
+            urllib.request.urlretrieve(url, path)
+            print(f"    {filename} загружен")
+        else:
+            print(f"  {filename} уже существует")
+    print("="*60 + "\n")
 
 
 def main():
+    download_data()
     config = get_config()
     logger = setup_logger()
     print("\n" + "="*60)
-    logger.info("Запуск Titanic ML пайплайна")
+    logger.info("Запуск House Prices ML пайплайна")
     print("="*60 + "\n")
 
     # ---- Загрузка данных ----
@@ -64,54 +84,59 @@ def main():
     logger.info("Создание новых признаков...")
     X, y = build_features(train_processed, config, fit=True)
     X_test = build_features(test_processed, config, fit=False)[0]
-    X = ensure_numeric(X)
-    X_test = ensure_numeric(X_test)
     logger.info(f"Создано признаков: {X.shape[1]}\n")
 
     # ---- Разделение на train/val ----
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=config.random_state, stratify=y
+        X, y, test_size=0.2, random_state=config.random_state
     )
     logger.info(f"Train size: {X_train.shape[0]}, Val size: {X_val.shape[0]}\n")
 
-    # ---- Обучение базовых моделей на X_train с графиками ----
+    # ---- Обучение базовых моделей на X_train ----
     logger.info("Обучение базовых моделей на train...")
-    model_names = ["xgboost", "lightgbm", "logistic_regression"]
+    model_names = ["ridge", "lasso", "elasticnet", "knn", "decision_tree", "random_forest", "catboost", "xgboost", "lightgbm"]
     trained_models_val = {}
 
-    # CatBoost с графиком
-    logger.info("Обучение CatBoost на train...")
-    cb_model = CatBoostClassifier(
+    for name in model_names:
+        model = get_model(name, config)
+        if model is not None:
+            model.fit(X_train, y_train)
+            trained_models_val[name] = model
+            logger.info(f"  {name} обучен")
+
+    # ---- CatBoost с графиком RMSE ----
+    logger.info("Обучение CatBoost на train (с графиком)...")
+    cb_model = CatBoostRegressor(
         iterations=config.cb_iterations,
         learning_rate=config.cb_learning_rate,
         depth=config.cb_depth,
         verbose=False,
         early_stopping_rounds=config.cb_early_stopping_rounds,
         random_state=config.random_state,
-        custom_metric=['Accuracy']
+        eval_metric='RMSE'
     )
     cb_model.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
     trained_models_val['catboost'] = cb_model
 
     cb_history = cb_model.get_evals_result()
-    train_loss_cb = cb_history['learn']['Logloss']
-    val_loss_cb = cb_history['validation']['Logloss']
-    val_acc_cb = cb_history['validation']['Accuracy']
+    train_rmse_cb = cb_history['learn']['RMSE']
+    val_rmse_cb = cb_history['validation']['RMSE']
 
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
-    plt.plot(train_loss_cb, label='Train Logloss')
-    plt.plot(val_loss_cb, label='Val Logloss')
+    plt.plot(train_rmse_cb, label='Train RMSE')
+    plt.plot(val_rmse_cb, label='Val RMSE')
     plt.xlabel('Iteration')
-    plt.ylabel('Logloss')
-    plt.title('CatBoost Loss')
+    plt.ylabel('RMSE')
+    plt.title('CatBoost RMSE')
     plt.legend()
     plt.grid(True)
+
     plt.subplot(1, 2, 2)
-    plt.plot(val_acc_cb, label='Val Accuracy')
+    plt.plot(val_rmse_cb, label='Val RMSE')
     plt.xlabel('Iteration')
-    plt.ylabel('Accuracy')
-    plt.title('CatBoost Accuracy')
+    plt.ylabel('RMSE')
+    plt.title('CatBoost Validation RMSE')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -120,16 +145,14 @@ def main():
     plt.close()
     logger.info("  График CatBoost сохранён в outputs/catboost_learning_curves.png\n")
 
-    # Random Forest с графиком (loss + accuracy)
-    logger.info("Обучение Random Forest на train...")
+    # ---- Random Forest с графиком RMSE ----
+    logger.info("Обучение Random Forest на train (с графиком)...")
     n_estimators_range = list(range(10, 210, 10))
-    train_scores_rf = []
-    val_scores_rf = []
-    train_loss_rf = []
-    val_loss_rf = []
+    train_rmse_rf = []
+    val_rmse_rf = []
 
     for n in n_estimators_range:
-        rf = RandomForestClassifier(
+        rf = RandomForestRegressor(
             n_estimators=n,
             max_depth=config.rf_max_depth,
             min_samples_split=config.rf_min_samples_split,
@@ -138,14 +161,12 @@ def main():
             n_jobs=-1
         )
         rf.fit(X_train, y_train)
-        train_scores_rf.append(rf.score(X_train, y_train))
-        val_scores_rf.append(rf.score(X_val, y_val))
-        train_probs = rf.predict_proba(X_train)
-        val_probs = rf.predict_proba(X_val)
-        train_loss_rf.append(log_loss(y_train, train_probs))
-        val_loss_rf.append(log_loss(y_val, val_probs))
+        train_pred = rf.predict(X_train)
+        val_pred = rf.predict(X_val)
+        train_rmse_rf.append(np.sqrt(mean_squared_error(y_train, train_pred)))
+        val_rmse_rf.append(np.sqrt(mean_squared_error(y_val, val_pred)))
 
-    rf_final = RandomForestClassifier(
+    rf_final = RandomForestRegressor(
         n_estimators=config.rf_n_estimators,
         max_depth=config.rf_max_depth,
         min_samples_split=config.rf_min_samples_split,
@@ -158,19 +179,19 @@ def main():
 
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
-    plt.plot(n_estimators_range, train_loss_rf, label='Train Logloss')
-    plt.plot(n_estimators_range, val_loss_rf, label='Val Logloss')
+    plt.plot(n_estimators_range, train_rmse_rf, label='Train RMSE')
+    plt.plot(n_estimators_range, val_rmse_rf, label='Val RMSE')
     plt.xlabel('Number of Trees')
-    plt.ylabel('Logloss')
-    plt.title('Random Forest Loss')
+    plt.ylabel('RMSE')
+    plt.title('Random Forest RMSE')
     plt.legend()
     plt.grid(True)
+
     plt.subplot(1, 2, 2)
-    plt.plot(n_estimators_range, train_scores_rf, label='Train Accuracy')
-    plt.plot(n_estimators_range, val_scores_rf, label='Val Accuracy')
+    plt.plot(n_estimators_range, val_rmse_rf, label='Val RMSE')
     plt.xlabel('Number of Trees')
-    plt.ylabel('Accuracy')
-    plt.title('Random Forest Accuracy')
+    plt.ylabel('RMSE')
+    plt.title('RF Validation RMSE')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -178,14 +199,7 @@ def main():
     plt.close()
     logger.info("  График Random Forest сохранён в outputs/rf_learning_curves.png\n")
 
-    # Остальные модели
-    for name in model_names:
-        model = get_model(name, config)
-        if model is not None:
-            model.fit(X_train, y_train)
-            trained_models_val[name] = model
-
-    # DNN на X_train
+    # ---- DNN на X_train ----
     logger.info("Обучение DNN на train...")
     dnn_model_val, dnn_history = train_dnn(
         X_train, y_train, X_val, y_val,
@@ -193,15 +207,15 @@ def main():
         return_history=True
     )
     dnn_preds_val = predict_dnn(dnn_model_val, X_val)
-    dnn_acc_val = np.mean((dnn_preds_val >= 0.5) == y_val)
-    logger.info(f"  DNN val accuracy: {dnn_acc_val:.4f}")
+    dnn_rmse_val = np.sqrt(mean_squared_error(y_val, dnn_preds_val))
+    logger.info(f"  DNN val RMSE: {dnn_rmse_val:.4f}")
 
     plt.figure(figsize=(10, 6))
     plt.plot(dnn_history['train_loss'], label='Train Loss')
     if dnn_history.get('val_loss'):
         plt.plot(dnn_history['val_loss'], label='Val Loss')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.ylabel('Loss (MSE)')
     plt.title('DNN Learning Curves')
     plt.legend()
     plt.grid(True)
@@ -209,45 +223,50 @@ def main():
     plt.close()
     logger.info("  График DNN сохранён в outputs/dnn_loss_curves.png\n")
 
-    # ---- Предсказания на X_val и оценка ансамблей ----
+    # ---- Предсказания на X_val для ансамблей ----
     val_preds_dict = {}
     for name, model in trained_models_val.items():
-        if hasattr(model, "predict_proba"):
-            val_preds_dict[name] = model.predict_proba(X_val)[:, 1]
-        else:
-            val_preds_dict[name] = model.predict(X_val).astype(float)
+        val_preds_dict[name] = model.predict(X_val)
     val_preds_dict['dnn'] = dnn_preds_val
 
+    # ---- Оценка ансамблей на X_val ----
     logger.info("Оценка ансамблей на валидации...")
     ensemble_scores = {}
 
+    # Simple average
     simple_avg = np.mean(list(val_preds_dict.values()), axis=0)
-    ensemble_scores['simple_average'] = np.mean((simple_avg >= 0.5) == y_val)
+    ensemble_scores['simple_average'] = np.sqrt(mean_squared_error(y_val, simple_avg))
 
-    weights = np.ones(len(val_preds_dict))
+    # Weighted average (по обратной RMSE)
+    weights = []
+    for name in model_names:
+        preds = val_preds_dict[name]
+        rmse = np.sqrt(mean_squared_error(y_val, preds))
+        weights.append(1.0 / (rmse + 1e-8))
+    weights.append(1.0 / (dnn_rmse_val + 1e-8))
+    weights = np.array(weights)
     weights = weights / weights.sum()
-    weighted_avg = np.sum(np.column_stack(list(val_preds_dict.values())) * weights, axis=1)
-    ensemble_scores['weighted_average'] = np.mean((weighted_avg >= 0.5) == y_val)
+    
+    all_preds = np.column_stack(list(val_preds_dict.values()))
+    weighted_avg = np.sum(all_preds * weights.reshape(1, -1), axis=1)
+    ensemble_scores['weighted_average'] = np.sqrt(mean_squared_error(y_val, weighted_avg))
 
-    binary_preds = np.column_stack([(p >= 0.5).astype(int) for p in val_preds_dict.values()])
-    hard_vote = np.apply_along_axis(lambda x: np.bincount(x).argmax(), axis=1, arr=binary_preds)
-    ensemble_scores['hard_voting'] = np.mean(hard_vote == y_val)
-
+    # Stacking (на базовых моделях, без DNN)
     logger.info("Оценка стекинга на валидации...")
-    stack_models = {k: v for k, v in trained_models_val.items() if k not in ['dnn', 'catboost']}
+    stack_models = {k: v for k, v in trained_models_val.items() if k != 'dnn'}
     estimators = [(name, model) for name, model in stack_models.items()]
-    stack = StackingClassifier(
+    stack = StackingRegressor(
         estimators=estimators,
-        final_estimator=LogisticRegression(C=1.0, random_state=config.random_state),
+        final_estimator=Ridge(alpha=1.0),
         cv=5,
         n_jobs=-1
     )
     stack.fit(X_train, y_train)
-    stack_preds_val = stack.predict_proba(X_val)[:, 1]
-    ensemble_scores['stacking'] = np.mean((stack_preds_val >= 0.5) == y_val)
+    stack_preds_val = stack.predict(X_val)
+    ensemble_scores['stacking'] = np.sqrt(mean_squared_error(y_val, stack_preds_val))
 
-    logger.info("Результаты на валидации:")
-    logger.info(f"  DNN (отдельно): {dnn_acc_val:.4f}")
+    logger.info("Результаты на валидации (RMSE):")
+    logger.info(f"  DNN (отдельно): {dnn_rmse_val:.4f}")
     for name, score in ensemble_scores.items():
         logger.info(f"  {name}: {score:.4f}")
     print("")
@@ -257,19 +276,10 @@ def main():
     cv_results = cross_validate_models(X, y, config)
     trained_models = cv_results["trained_models"]
 
-    # ---- GridSearch ----
-    logger.info("GridSearch для Random Forest и CatBoost...")
-    grid_results = grid_search_models(X, y, config)
-
     # ---- DNN на всех данных ----
     logger.info("Обучение DNN на всех данных...")
     dnn_model_full = train_dnn(X, y, config=config)
     dnn_preds = predict_dnn(dnn_model_full, X_test)
-
-    # ---- Сравнение 1 vs 5 фолдов ----
-    logger.info("Сравнение 1 vs 5 фолдов...")
-    compare_df = compare_k_folds(X, y, config)
-    print("")
 
     # ---- Ансамбли для сабмита ----
     logger.info("Создание ансамблей для сабмита...")
@@ -280,58 +290,65 @@ def main():
 
     # ---- Стек для сабмита ----
     logger.info("Создание стекинга для сабмита...")
-    top_models = {k: trained_models[k] for k in ['random_forest', 'xgboost', 'lightgbm'] if k in trained_models}
+    top_models = {k: trained_models[k] for k in ['random_forest', 'catboost', 'xgboost', 'lightgbm'] if k in trained_models}
     estimators = [(name, model) for name, model in top_models.items()]
-    stack_final = StackingClassifier(
+    stack_final = StackingRegressor(
         estimators=estimators,
-        final_estimator=LogisticRegression(C=1.0, random_state=config.random_state),
+        final_estimator=Ridge(alpha=1.0),
         cv=5,
         n_jobs=-1
     )
     stack_final.fit(X, y)
-    stacking_preds = stack_final.predict_proba(X_test)[:, 1]
-    ensemble_results['stacking'] = {'test_pred': stacking_preds, 'description': 'Stacking (RF+XGB+LGB)'}
+    stacking_preds = stack_final.predict(X_test)
+    ensemble_results['stacking'] = {'test_pred': stacking_preds, 'description': 'Stacking (RF+XGB+LGB+CB)'}
 
     # ---- Сохранение сабмитов ----
     logger.info("Сохранение сабмитов...")
+
+    # CatBoost
     if 'catboost' in trained_models:
-        cb_model_full = trained_models['catboost']
-        if hasattr(cb_model_full, "predict_proba"):
-            cat_preds = cb_model_full.predict_proba(X_test)[:, 1]
-        else:
-            cat_preds = cb_model_full.predict(X_test).astype(float)
-        save_submission_from_preds(cat_preds, test_df['PassengerId'], suffix="catboost")
+        cb_preds = trained_models['catboost'].predict(X_test)
+        save_submission_from_preds(cb_preds, test_df['Id'], suffix="catboost", log_transform=config.log_transform_target)
         logger.info("  Сохранён: submissions/submission_catboost.csv")
 
-    save_submission_from_preds(dnn_preds, test_df['PassengerId'], suffix="dnn")
+    # Random Forest
+    if 'random_forest' in trained_models:
+        rf_preds = trained_models['random_forest'].predict(X_test)
+        save_submission_from_preds(rf_preds, test_df['Id'], suffix="random_forest", log_transform=config.log_transform_target)
+        logger.info("  Сохранён: submissions/submission_random_forest.csv")
+
+    # DNN
+    save_submission_from_preds(dnn_preds, test_df['Id'], suffix="dnn", log_transform=config.log_transform_target)
     logger.info("  Сохранён: submissions/submission_dnn.csv")
 
+    # Ансамбли
     for name, result in ensemble_results.items():
         if name in ['best_name', 'best_pred', 'best_model']:
             continue
         if 'test_pred' in result:
             preds = result['test_pred']
-            save_submission_from_preds(preds, test_df['PassengerId'], suffix=name)
+            save_submission_from_preds(preds, test_df['Id'], suffix=name, log_transform=config.log_transform_target)
             logger.info(f"  Сохранён: submissions/submission_{name}.csv")
 
-    best_val_ensemble = max(ensemble_scores, key=ensemble_scores.get)
+    # Лучший ансамбль по валидации
+    best_val_ensemble = min(ensemble_scores, key=ensemble_scores.get)
     best_preds = ensemble_results[best_val_ensemble]['test_pred']
-    save_submission_from_preds(best_preds, test_df['PassengerId'], suffix="best_ensemble")
+    save_submission_from_preds(best_preds, test_df['Id'], suffix="best_ensemble", log_transform=config.log_transform_target)
     logger.info(f"  Сохранён: submissions/submission_best_ensemble.csv (лучший по валидации: {best_val_ensemble})")
 
     # ---- Сохранение результатов ----
     save_results(
         cv_results, ensemble_results, config,
-        grid_results=grid_results,
-        fold_comparison=compare_df,
+        grid_results=None,
+        fold_comparison=None,
         ensemble_scores=ensemble_scores
     )
     logger.info("Результаты сохранены в outputs/results.json")
 
     # ---- Финальный вывод ----
     print("\n" + "="*60)
-    logger.info(f"Лучшая модель CV: {cv_results['best_name']} ({cv_results['best_score']:.4f})")
-    logger.info(f"Лучший ансамбль по валидации: {best_val_ensemble} ({ensemble_scores[best_val_ensemble]:.4f})")
+    logger.info(f"Лучшая модель CV (RMSE): {cv_results['best_name']} ({cv_results['best_score']:.4f})")
+    logger.info(f"Лучший ансамбль по валидации (RMSE): {best_val_ensemble} ({ensemble_scores[best_val_ensemble]:.4f})")
     logger.info("="*60 + "\n")
 
 

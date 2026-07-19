@@ -1,41 +1,49 @@
 import pandas as pd
 import numpy as np
 
-_FARE_BINS = None
-
-def build_features(df: pd.DataFrame, config, fit: bool = True):
-    global _FARE_BINS
+def build_features(df, config, fit=True):
     data = df.copy()
-    
-    # Age_band (фиксированные бины)
-    bins = [0, 16, 32, 48, 64, 100]
-    labels = [0, 1, 2, 3, 4]
-    data["Age_band"] = pd.cut(data["Age"], bins=bins, labels=labels, right=False)
-    data["Age_band"] = data["Age_band"].astype(float)
-    
-    data["Family_Size"] = data.get("SibSp", 0) + data.get("Parch", 0)
-    data["Alone"] = (data["Family_Size"] == 0).astype(int)
-    
-    if "Fare" in data.columns:
-        if fit:
-            _, bins_fare = pd.qcut(data["Fare"].clip(lower=0.01), q=config.fare_bins, retbins=True, duplicates='drop')
-            _FARE_BINS = bins_fare
-            data["Fare_cat"] = pd.cut(data["Fare"].clip(lower=0.01), bins=_FARE_BINS, labels=False, include_lowest=True)
-        else:
-            if _FARE_BINS is not None:
-                data["Fare_cat"] = pd.cut(data["Fare"].clip(lower=0.01), bins=_FARE_BINS, labels=False, include_lowest=True)
-            else:
-                raise ValueError("Fare bins not fitted. Call fit=True first.")
-        data["Fare_cat"] = data["Fare_cat"].astype(float)
-    
-    drop_cols = ["Name", "Ticket", "Cabin", "PassengerId"]
-    for col in drop_cols:
-        if col in data.columns:
-            data = data.drop(columns=[col])
-    
-    if "Survived" in data.columns:
-        y = data["Survived"]
-        X = data.drop(columns=["Survived"])
-        return X, y
+
+    # 1. Если есть SalePrice, логарифмируем (для регрессии)
+    if 'SalePrice' in data.columns and config.log_transform_target:
+        y = np.log1p(data['SalePrice'])
+        X = data.drop(columns=['SalePrice'])
+    elif 'SalePrice' in data.columns:
+        y = data['SalePrice']
+        X = data.drop(columns=['SalePrice'])
     else:
-        return data, None
+        y = None
+        X = data
+
+    # 2. Создание новых признаков (примеры для House Prices)
+    # Общая площадь
+    if 'TotalBsmtSF' in X.columns and '1stFlrSF' in X.columns and '2ndFlrSF' in X.columns:
+        X['TotalSF'] = X['TotalBsmtSF'] + X['1stFlrSF'] + X['2ndFlrSF']
+
+    # Общее качество
+    if 'OverallQual' in X.columns and 'OverallCond' in X.columns:
+        X['OverallQuality'] = X['OverallQual'] * X['OverallCond']
+
+    # Возраст дома
+    if 'YearBuilt' in X.columns and 'YrSold' in X.columns:
+        X['HouseAge'] = X['YrSold'] - X['YearBuilt']
+
+    # Ремонт
+    if 'YearRemodAdd' in X.columns and 'YearBuilt' in X.columns:
+        X['YearsSinceRemod'] = X['YearRemodAdd'] - X['YearBuilt']
+
+    # Количество санузлов
+    if 'FullBath' in X.columns and 'HalfBath' in X.columns and 'BsmtFullBath' in X.columns and 'BsmtHalfBath' in X.columns:
+        X['TotalBath'] = X['FullBath'] + 0.5*X['HalfBath'] + X['BsmtFullBath'] + 0.5*X['BsmtHalfBath']
+
+    # Количество крытых парковок
+    if 'GarageCars' in X.columns and 'GarageArea' in X.columns:
+        X['GarageCapacity'] = X['GarageCars'] * X['GarageArea']
+
+    # 3. Удаление признаков с высоким процентом пропусков (если есть)
+    # Например, если >50% пропусков — удаляем
+    for col in X.columns:
+        if X[col].isnull().mean() > 0.5:
+            X = X.drop(columns=[col])
+
+    return X, y

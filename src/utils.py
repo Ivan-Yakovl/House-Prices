@@ -30,7 +30,7 @@ def save_results(cv_results, ensemble_results, config, grid_results=None, fold_c
         "ensemble_results": {
             name: {
                 "description": res.get("description", ""),
-                "val_accuracy": ensemble_scores.get(name, None) if ensemble_scores else None
+                "val_rmse": ensemble_scores.get(name, None) if ensemble_scores else None
             }
             for name, res in ensemble_results.items()
             if name not in ["best_name", "best_pred", "best_model"]
@@ -47,15 +47,13 @@ def save_results(cv_results, ensemble_results, config, grid_results=None, fold_c
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def save_submission_from_preds(preds, passenger_ids, suffix='best'):
-    """Сохранение сабмита из предсказаний (вероятности или бинарные)"""
+def save_submission_from_preds(preds, passenger_ids, suffix='best', log_transform=True):
+    """Сохранение сабмита. Если log_transform=True, применяет expm1"""
     Path("submissions").mkdir(exist_ok=True)
-    binary = (np.array(preds) >= 0.5).astype(int)
+    if log_transform:
+        preds = np.expm1(preds)  # обратное преобразование из логарифма
     submission = pd.DataFrame({
-        'PassengerId': passenger_ids,
-        'Survived': binary
+        'Id': passenger_ids,
+        'SalePrice': preds
     })
     submission.to_csv(f"submissions/submission_{suffix}.csv", index=False)
-
-
-# (удалена дублирующая функция save_submission, т.к. она не используется)

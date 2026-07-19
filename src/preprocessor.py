@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from sklearn.preprocessing import LabelEncoder
 
 class Preprocessor:
@@ -6,6 +7,7 @@ class Preprocessor:
         self.config = config
         self.label_encoders = {}
         self.fitted = False
+        self.numerical_medians = {}
 
     def fit_transform(self, df):
         self.fitted = True
@@ -17,43 +19,42 @@ class Preprocessor:
     def _process(self, df):
         data = df.copy()
 
-        # Извлечение Initial
-        data["Initial"] = data["Name"].str.extract(r"([A-Za-z]+)\.")
-        initial_map = {
-            "Mlle": "Miss", "Mme": "Miss", "Ms": "Miss",
-            "Dr": "Mr", "Major": "Mr", "Col": "Mr",
-            "Rev": "Mr", "Capt": "Mr", "Sir": "Mr",
-            "Don": "Mr", "Jonkheer": "Other",
-            "Lady": "Mrs", "Countess": "Mrs"
-        }
-        data["Initial"] = data["Initial"].replace(initial_map)
+        # 1. Заполнение пропусков в числовых признаках
+        if self.config.fill_numerical:
+            num_cols = data.select_dtypes(include=[np.number]).columns
+            for col in num_cols:
+                if data[col].isnull().any():
+                    if self.fitted:
+                        median = data[col].median()
+                        self.numerical_medians[col] = median
+                    else:
+                        median = self.numerical_medians.get(col, 0)
+                    data[col] = data[col].fillna(median)
 
-        # Заполнение пропусков в Age
-        if self.config.fill_age:
-            age_means = data.groupby("Initial")["Age"].mean().round().astype(int)
-            for initial, age in age_means.items():
-                mask = data["Age"].isnull() & (data["Initial"] == initial)
-                data.loc[mask, "Age"] = age
+        # 2. Заполнение пропусков в категориальных признаках
+        if self.config.fill_categorical:
+            cat_cols = data.select_dtypes(include=['object']).columns
+            for col in cat_cols:
+                if data[col].isnull().any():
+                    data[col] = data[col].fillna("None")
 
-        # Заполнение пропусков в Embarked
-        if self.config.fill_embarked:
-            data["Embarked"] = data["Embarked"].fillna("S")
-
-        if "Fare" in data.columns:
-            data["Fare"] = data["Fare"].fillna(data["Fare"].median())
-
-        # Кодирование категориальных признаков
-        categorical_cols = ["Sex", "Embarked", "Initial"]
-        for col in categorical_cols:
-            if col in data.columns:
-                if self.fitted:
-                    le = LabelEncoder()
-                    data[col] = le.fit_transform(data[col].astype(str))
-                    self.label_encoders[col] = le
+        # 3. Кодирование категориальных признаков
+        cat_cols = data.select_dtypes(include=['object']).columns
+        for col in cat_cols:
+            if self.fitted:
+                le = LabelEncoder()
+                data[col] = le.fit_transform(data[col].astype(str))
+                self.label_encoders[col] = le
+            else:
+                le = self.label_encoders.get(col)
+                if le:
+                    data[col] = le.transform(data[col].astype(str))
                 else:
-                    le = self.label_encoders.get(col)
-                    if le:
-                        data[col] = le.transform(data[col].astype(str))
+                    data[col] = data[col].astype('category').cat.codes
+
+        # 4. Удаление Id (не нужно для обучения)
+        if 'Id' in data.columns:
+            data = data.drop(columns=['Id'])
 
         return data
 
