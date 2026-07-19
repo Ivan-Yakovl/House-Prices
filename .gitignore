@@ -13,18 +13,6 @@ build/
 
 # Jupyter Notebooks
 .ipynb_checkpoints/
-*.ipynb
-
-# Data files
-data/
-*.csv
-*.mat
-
-# Outputs
-outputs/
-submissions/
-*.png
-*.jpg
 
 # Environment
 venv/
