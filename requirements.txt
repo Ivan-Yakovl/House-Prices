@@ -6,3 +6,6 @@ xgboost
 lightgbm
 matplotlib
 seaborn
+torch
+torchvision
+tqdm
